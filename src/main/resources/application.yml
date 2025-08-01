@@ -1,0 +1,292 @@
+server:
+  port: 8080
+  servlet:
+    context-path: /api
+
+spring:
+  application:
+    name: enterprise-financial-data-hub
+  
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:development}
+  
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/financial_hub?useSSL=true&serverTimezone=UTC}
+    username: ${DB_USERNAME:finuser}
+    password: ${DB_PASSWORD:password}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 50
+      minimum-idle: 10
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      leak-detection-threshold: 60000
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQL8Dialect
+        format_sql: true
+        jdbc:
+          batch_size: 50
+        order_inserts: true
+        order_updates: true
+        cache:
+          use_second_level_cache: true
+          region:
+            factory_class: org.hibernate.cache.caffeine.CaffeineCacheRegionFactory
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      retries: 3
+      properties:
+        enable.idempotence: true
+    consumer:
+      group-id: financial-data-hub
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+
+  vault:
+    host: ${VAULT_HOST:localhost}
+    port: ${VAULT_PORT:8200}
+    scheme: ${VAULT_SCHEME:http}
+    authentication: token
+    token: ${VAULT_TOKEN:root}
+    kv:
+      enabled: true
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${JWT_ISSUER_URI:http://localhost:8080/auth/realms/financial-hub}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus,info,loggers
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+    tags:
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:development}
+
+logging:
+  level:
+    com.enterprise.financialhub: INFO
+    org.springframework.vault: WARN
+    org.hibernate.SQL: WARN
+    org.hibernate.type.descriptor.sql.BasicBinder: WARN
+  pattern:
+    console: "%d{HH:mm:ss.SSS} [%thread] %-5level [%X{traceId},%X{spanId}] %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{traceId},%X{spanId}] %logger{36} - %msg%n"
+  file:
+    name: logs/financial-data-hub.log
+
+# Application-specific configuration
+ingestion:
+  deployment-type: ${DEPLOYMENT_TYPE:on-premises}
+  
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    batch-size: 1000
+    topic: transaction-ingestion
+    dead-letter-topic: transaction-ingestion-dlq
+  
+  security:
+    encryption-enabled: true
+    keystore-path: ${KEYSTORE_PATH:/etc/ssl/keystore.jks}
+    keystore-password: ${KEYSTORE_PASSWORD:changeit}
+    truststore-path: ${TRUSTSTORE_PATH:/etc/ssl/truststore.jks}
+    truststore-password: ${TRUSTSTORE_PASSWORD:changeit}
+    oauth:
+      token-endpoint: ${OAUTH_TOKEN_ENDPOINT:http://localhost:8080/auth/token}
+      client-id: ${OAUTH_CLIENT_ID:financial-hub-client}
+      client-secret: ${OAUTH_CLIENT_SECRET:client-secret}
+      scope: ingestion:write
+  
+  connectors:
+    connectors:
+      national_gateway_rtp:
+        endpoint-url: ${RTP_ENDPOINT_URL:https://api.rtp.com/v1/transactions}
+        auth-type: oauth2
+        connect-timeout-ms: 30000
+        read-timeout-ms: 60000
+        max-retries: 3
+      payment_gateway_stripe:
+        endpoint-url: ${STRIPE_ENDPOINT_URL:https://api.stripe.com/v1/charges}
+        auth-type: basic
+        connect-timeout-ms: 15000
+        read-timeout-ms: 30000
+        max-retries: 3
+  
+  validation:
+    strict-mode: ${VALIDATION_STRICT_MODE:true}
+    required-fields: 
+      - transactionId
+      - amount
+      - currency
+    max-amount: 1000000.00
+    min-amount: 0.01
+  
+  reconciliation:
+    fuzzy-match-threshold: 0.8
+    enable-rule-based-matching: true
+    matching-fields:
+      - amount
+      - date
+      - reference
+    max-processing-time: PT30M
+    batch-size: 10000
+  
+  anomaly:
+    fraud-detection-threshold: 0.7
+    pattern-anomaly-threshold: 0.6
+    profile-anomaly-threshold: 0.6
+    alert-severity-thresholds:
+      critical: 0.9
+      high: 0.7
+      medium: 0.5
+      low: 0.3
+    model-refresh-interval: PT24H
+  
+  entity:
+    deduplication-threshold: 0.8
+    enrichment-enabled: true
+    max-relationships-per-entity: 1000
+    golden-record-auto-creation: true
+  
+  performance:
+    max-concurrent-connections: 100
+    thread-pool-size: 20
+    cache-size: 10000
+    cache-ttl: PT1H
+
+# Resilience4j configuration
+resilience4j:
+  circuitbreaker:
+    instances:
+      dataConnector:
+        registerHealthIndicator: true
+        slidingWindowSize: 10
+        minimumNumberOfCalls: 5
+        permittedNumberOfCallsInHalfOpenState: 3
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        waitDurationInOpenState: 30s
+        failureRateThreshold: 50
+        eventConsumerBufferSize: 10
+      vault:
+        registerHealthIndicator: true
+        slidingWindowSize: 10
+        minimumNumberOfCalls: 5
+        waitDurationInOpenState: 30s
+        failureRateThreshold: 50
+      enrichment:
+        registerHealthIndicator: true
+        slidingWindowSize: 20
+        minimumNumberOfCalls: 10
+        waitDurationInOpenState: 60s
+        failureRateThreshold: 60
+  
+  retry:
+    instances:
+      dataConnector:
+        maxAttempts: 3
+        waitDuration: 2s
+        retryExceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+      vault:
+        maxAttempts: 3
+        waitDuration: 1s
+        retryExceptions:
+          - org.springframework.vault.VaultException
+      enrichment:
+        maxAttempts: 2
+        waitDuration: 3s
+        retryExceptions:
+          - java.io.IOException
+  
+  bulkhead:
+    instances:
+      dataConnector:
+        maxConcurrentCalls: 10
+        maxWaitDuration: 5s
+      enrichment:
+        maxConcurrentCalls: 5
+        maxWaitDuration: 3s
+  
+  ratelimiter:
+    instances:
+      api:
+        limitForPeriod: 100
+        limitRefreshPeriod: 1s
+        timeoutDuration: 0s
+
+# Credential manager configuration
+credential-manager:
+  max-cache-size: 10000
+  cache-ttl-minutes: 30
+  refresh-before-expiry-minutes: 10
+  proactive-refresh-interval-minutes: 5
+
+---
+# Development profile
+spring:
+  config:
+    activate:
+      on-profile: development
+  
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+  
+  h2:
+    console:
+      enabled: true
+
+logging:
+  level:
+    com.enterprise.financialhub: DEBUG
+    org.springframework.security: DEBUG
+
+---
+# Production profile
+spring:
+  config:
+    activate:
+      on-profile: production
+  
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+
+logging:
+  level:
+    com.enterprise.financialhub: INFO
+    org.springframework.security: WARN
+  file:
+    name: /var/log/financial-data-hub/application.log
+
+management:
+  endpoint:
+    health:
+      show-details: when-authorized
